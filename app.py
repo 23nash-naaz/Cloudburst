@@ -5,12 +5,15 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from io import StringIO
+import re
+
 # Page configuration
 st.set_page_config(
     page_title="Cloudburst Prediction System - India",
     page_icon="🌧️",
     layout="wide"
 )
+
 # Initialize SQLite Database
 @st.cache_resource
 def init_database():
@@ -156,8 +159,14 @@ def init_database():
         conn.commit()
    
     return conn
+
 # Initialize database
 conn = init_database()
+
+# Initialize chat history
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = []
+
 # List of all Indian states
 all_indian_states = [
     "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh",
@@ -167,10 +176,12 @@ all_indian_states = [
     "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", "Tripura",
     "Uttar Pradesh", "Uttarakhand", "West Bengal", "Jammu and Kashmir"
 ]
+
 # Helper functions
 def execute_query(query, params=()):
     """Execute SQL query and return results as DataFrame"""
     return pd.read_sql_query(query, conn, params=params)
+
 def get_cloudburst_history(state=None):
     """Get cloudburst history for a specific state or all states"""
     if state:
@@ -179,6 +190,7 @@ def get_cloudburst_history(state=None):
     else:
         query = "SELECT * FROM cloudburst_history ORDER BY date DESC"
         return execute_query(query)
+
 def get_weather_data(state=None):
     """Get current weather data"""
     if state:
@@ -187,6 +199,7 @@ def get_weather_data(state=None):
     else:
         query = "SELECT * FROM weather_data ORDER BY date DESC"
         return execute_query(query)
+
 def predict_cloudburst(state):
     """Predict cloudburst probability based on historical and weather data"""
     # Get historical data
@@ -286,6 +299,7 @@ def predict_cloudburst(state):
         'avg_casualties': round(avg_casualties, 1),
         'weather': weather.iloc[0] if not weather.empty else None
     }
+
 def query_information(query_type, state, district=None):
     """Query specific information about rainfall, humidity, precipitation"""
     if query_type == "Historical Rainfall":
@@ -324,15 +338,447 @@ def query_information(query_type, state, district=None):
             ORDER BY date
         """
         return execute_query(query, (state,))
+
+# Chatbot functions
+def process_chatbot_query(user_query):
+    """Process natural language queries and return appropriate responses"""
+    query_lower = user_query.lower()
+    
+    # Extract state names from query
+    mentioned_states = [state for state in all_indian_states if state.lower() in query_lower]
+    
+    try:
+        # Query: Which state has most/more cloudbursts?
+        if any(word in query_lower for word in ['most cloudburst', 'more cloudburst', 'highest cloudburst', 'maximum cloudburst']):
+            result = execute_query("""
+                SELECT state, COUNT(*) as total_incidents
+                FROM cloudburst_history
+                GROUP BY state
+                ORDER BY total_incidents DESC
+                LIMIT 5
+            """)
+            
+            if not result.empty:
+                response = "**📊 States with Most Cloudbursts:**\n\n"
+                for idx, row in result.iterrows():
+                    response += f"{idx+1}. **{row['state']}**: {row['total_incidents']} incidents\n"
+                return response, result
+        
+        # Query: Least cloudbursts / Safest places
+        elif any(word in query_lower for word in ['least cloudburst', 'fewest cloudburst', 'lowest cloudburst', 'safest', 'safe place', 'safe state', 'safer']):
+            result = execute_query("""
+                SELECT state, COUNT(*) as total_incidents
+                FROM cloudburst_history
+                GROUP BY state
+                ORDER BY total_incidents ASC
+                LIMIT 5
+            """)
+            
+            if not result.empty:
+                response = "**✅ Safest States (Least Cloudbursts):**\n\n"
+                for idx, row in result.iterrows():
+                    response += f"{idx+1}. **{row['state']}**: {row['total_incidents']} incidents\n"
+                response += "\n💡 These states have experienced the fewest cloudburst incidents historically."
+                return response, result
+        
+        # Query: States with no cloudbursts
+        elif 'no cloudburst' in query_lower or 'zero cloudburst' in query_lower or 'never had' in query_lower:
+            all_states_df = pd.DataFrame({'state': all_indian_states})
+            states_with_cloudbursts = execute_query("SELECT DISTINCT state FROM cloudburst_history")
+            safe_states = all_states_df[~all_states_df['state'].isin(states_with_cloudbursts['state'])]
+            
+            if not safe_states.empty:
+                response = "**🛡️ States with No Recorded Cloudbursts:**\n\n"
+                for idx, state in enumerate(safe_states['state'].values, 1):
+                    response += f"{idx}. **{state}**\n"
+                response += f"\n✅ Total: **{len(safe_states)}** states have no historical cloudburst data."
+                return response, safe_states
+            else:
+                return "All states with available data have experienced cloudbursts.", None
+        
+        # Query: Most dangerous/deadliest
+        elif any(word in query_lower for word in ['dangerous', 'deadliest', 'most fatal', 'most casualties', 'worst']):
+            result = execute_query("""
+                SELECT state, SUM(casualties) as total_casualties, COUNT(*) as incidents
+                FROM cloudburst_history
+                GROUP BY state
+                ORDER BY total_casualties DESC
+                LIMIT 5
+            """)
+            
+            if not result.empty:
+                response = "**💔 Most Dangerous States (By Casualties):**\n\n"
+                for idx, row in result.iterrows():
+                    response += f"{idx+1}. **{row['state']}**: {int(row['total_casualties'])} casualties ({int(row['incidents'])} incidents)\n"
+                return response, result
+        
+        # Query: When do cloudbursts occur most
+        elif any(word in query_lower for word in ['when', 'which month', 'what month', 'season', 'time of year']):
+            result = execute_query("""
+                SELECT 
+                    SUBSTR(date, 6, 2) as month,
+                    COUNT(*) as incidents
+                FROM cloudburst_history
+                GROUP BY month
+                ORDER BY incidents DESC
+            """)
+            
+            if not result.empty:
+                month_names = {
+                    '01': 'January', '02': 'February', '03': 'March', '04': 'April',
+                    '05': 'May', '06': 'June', '07': 'July', '08': 'August',
+                    '09': 'September', '10': 'October', '11': 'November', '12': 'December'
+                }
+                result['month_name'] = result['month'].map(month_names)
+                
+                response = "**📅 Cloudburst Frequency by Month:**\n\n"
+                for idx, row in result.iterrows():
+                    response += f"**{row['month_name']}**: {row['incidents']} incidents\n"
+                response += "\n💡 Cloudbursts are most common during monsoon months (June-August)."
+                return response, result
+        
+        # Query: Districts with most cloudbursts
+        elif 'district' in query_lower and any(word in query_lower for word in ['most', 'highest', 'top']):
+            if mentioned_states:
+                state = mentioned_states[0]
+                result = execute_query("""
+                    SELECT district, COUNT(*) as incidents, SUM(casualties) as casualties
+                    FROM cloudburst_history
+                    WHERE state = ?
+                    GROUP BY district
+                    ORDER BY incidents DESC
+                """, (state,))
+                
+                if not result.empty:
+                    response = f"**🏘️ Most Affected Districts in {state}:**\n\n"
+                    for idx, row in result.iterrows():
+                        response += f"{idx+1}. **{row['district']}**: {row['incidents']} incidents, {int(row['casualties'])} casualties\n"
+                    return response, result
+            else:
+                result = execute_query("""
+                    SELECT state, district, COUNT(*) as incidents
+                    FROM cloudburst_history
+                    GROUP BY state, district
+                    ORDER BY incidents DESC
+                    LIMIT 10
+                """)
+                
+                if not result.empty:
+                    response = "**🏘️ Top 10 Most Affected Districts:**\n\n"
+                    for idx, row in result.iterrows():
+                        response += f"{idx+1}. **{row['district']}, {row['state']}**: {row['incidents']} incidents\n"
+                    return response, result
+        
+        # Query: Duration/intensity
+        elif any(word in query_lower for word in ['duration', 'how long', 'longest', 'shortest']):
+            if 'longest' in query_lower:
+                result = execute_query("""
+                    SELECT state, district, date, duration_hours, rainfall_mm
+                    FROM cloudburst_history
+                    ORDER BY duration_hours DESC
+                    LIMIT 5
+                """)
+                
+                if not result.empty:
+                    response = "**⏱️ Longest Duration Cloudbursts:**\n\n"
+                    for idx, row in result.iterrows():
+                        response += f"{idx+1}. **{row['state']}, {row['district']}** ({row['date']}): {row['duration_hours']} hours, {row['rainfall_mm']} mm\n"
+                    return response, result
+            else:
+                result = execute_query("""
+                    SELECT ROUND(AVG(duration_hours), 2) as avg_duration,
+                           ROUND(MIN(duration_hours), 2) as min_duration,
+                           ROUND(MAX(duration_hours), 2) as max_duration
+                    FROM cloudburst_history
+                """)
+                
+                if not result.empty:
+                    row = result.iloc[0]
+                    response = "**⏱️ Cloudburst Duration Statistics:**\n\n"
+                    response += f"Average duration: **{row['avg_duration']} hours**\n"
+                    response += f"Shortest duration: **{row['min_duration']} hours**\n"
+                    response += f"Longest duration: **{row['max_duration']} hours**"
+                    return response, result
+        
+        # Query: Year comparison
+        elif any(word in query_lower for word in ['2023 vs 2024', 'compare 2023', 'compare 2024', 'year comparison']):
+            result = execute_query("""
+                SELECT 
+                    SUBSTR(date, 1, 4) as year,
+                    COUNT(*) as incidents,
+                    SUM(casualties) as casualties,
+                    ROUND(AVG(rainfall_mm), 2) as avg_rainfall
+                FROM cloudburst_history
+                GROUP BY year
+                ORDER BY year
+            """)
+            
+            if not result.empty:
+                response = "**📊 Year-wise Comparison:**\n\n"
+                for idx, row in result.iterrows():
+                    response += f"**{row['year']}**: {row['incidents']} incidents, {int(row['casualties'])} casualties, {row['avg_rainfall']} mm avg rainfall\n"
+                return response, result
+        
+        # Query: High severity incidents
+        elif 'high severity' in query_lower or 'severe' in query_lower:
+            if mentioned_states:
+                state = mentioned_states[0]
+                result = execute_query("""
+                    SELECT district, date, rainfall_mm, casualties
+                    FROM cloudburst_history
+                    WHERE state = ? AND severity = 'High'
+                    ORDER BY rainfall_mm DESC
+                """, (state,))
+                
+                if not result.empty:
+                    response = f"**⚠️ High Severity Cloudbursts in {state}:**\n\n"
+                    response += f"Total high severity incidents: **{len(result)}**\n\n"
+                    return response, result
+            else:
+                result = execute_query("""
+                    SELECT state, COUNT(*) as high_severity_count
+                    FROM cloudburst_history
+                    WHERE severity = 'High'
+                    GROUP BY state
+                    ORDER BY high_severity_count DESC
+                """)
+                
+                if not result.empty:
+                    response = "**⚠️ High Severity Cloudbursts by State:**\n\n"
+                    for idx, row in result.iterrows():
+                        response += f"{idx+1}. **{row['state']}**: {row['high_severity_count']} high severity incidents\n"
+                    return response, result
+        
+        # Query: Trend analysis
+        elif any(word in query_lower for word in ['trend', 'increasing', 'decreasing', 'getting worse', 'getting better']):
+            result = execute_query("""
+                SELECT 
+                    SUBSTR(date, 1, 4) as year,
+                    COUNT(*) as incidents
+                FROM cloudburst_history
+                GROUP BY year
+                ORDER BY year
+            """)
+            
+            if not result.empty and len(result) > 1:
+                trend = "increasing" if result['incidents'].iloc[-1] > result['incidents'].iloc[0] else "decreasing"
+                response = f"**📈 Cloudburst Trend Analysis:**\n\n"
+                for idx, row in result.iterrows():
+                    response += f"**{row['year']}**: {row['incidents']} incidents\n"
+                response += f"\n💡 The trend shows {trend} frequency from 2023 to 2024."
+                return response, result
+        
+        # Query: Risk level / prediction
+        elif any(word in query_lower for word in ['risk', 'prediction', 'forecast', 'likely']) and mentioned_states:
+            state = mentioned_states[0]
+            prediction = predict_cloudburst(state)
+            
+            response = f"**🔮 Risk Assessment for {state}:**\n\n"
+            response += f"Risk Level: **{prediction['risk']}**\n"
+            response += f"Probability: **{prediction['probability']}%**\n"
+            response += f"Total Incidents: **{prediction['total_incidents']}**\n"
+            response += f"Recent Incidents (2024): **{prediction['recent_incidents']}**\n\n"
+            response += f"💡 {prediction['message']}"
+            
+            return response, None
+            
+        # Query: Total casualties
+        elif 'total casualties' in query_lower or 'how many deaths' in query_lower or 'total deaths' in query_lower:
+            if mentioned_states:
+                state = mentioned_states[0]
+                result = execute_query("""
+                    SELECT state, SUM(casualties) as total_casualties, COUNT(*) as incidents
+                    FROM cloudburst_history
+                    WHERE state = ?
+                    GROUP BY state
+                """, (state,))
+                
+                if not result.empty:
+                    response = f"**💔 Casualties in {state}:**\n\n"
+                    response += f"Total casualties: **{int(result['total_casualties'].iloc[0])}**\n"
+                    response += f"Total incidents: **{int(result['incidents'].iloc[0])}**"
+                    return response, result
+            else:
+                result = execute_query("""
+                    SELECT SUM(casualties) as total_casualties, COUNT(*) as total_incidents
+                    FROM cloudburst_history
+                """)
+                
+                response = f"**💔 Overall Casualties:**\n\n"
+                response += f"Total casualties: **{int(result['total_casualties'].iloc[0])}**\n"
+                response += f"Total incidents: **{int(result['total_incidents'].iloc[0])}**"
+                return response, result
+        
+        # Query: Highest/maximum rainfall
+        elif 'highest rainfall' in query_lower or 'maximum rainfall' in query_lower or 'most rainfall' in query_lower:
+            if mentioned_states:
+                state = mentioned_states[0]
+                result = execute_query("""
+                    SELECT state, district, date, rainfall_mm, severity
+                    FROM cloudburst_history
+                    WHERE state = ?
+                    ORDER BY rainfall_mm DESC
+                    LIMIT 1
+                """, (state,))
+            else:
+                result = execute_query("""
+                    SELECT state, district, date, rainfall_mm, severity
+                    FROM cloudburst_history
+                    ORDER BY rainfall_mm DESC
+                    LIMIT 1
+                """)
+            
+            if not result.empty:
+                row = result.iloc[0]
+                response = f"**🌧️ Highest Rainfall Record:**\n\n"
+                response += f"State: **{row['state']}**\n"
+                response += f"District: **{row['district']}**\n"
+                response += f"Date: **{row['date']}**\n"
+                response += f"Rainfall: **{row['rainfall_mm']} mm**\n"
+                response += f"Severity: **{row['severity']}**"
+                return response, result
+        
+        # Query: Information about specific state
+        elif mentioned_states:
+            state = mentioned_states[0]
+            
+            # Get state statistics
+            stats = execute_query("""
+                SELECT 
+                    COUNT(*) as total_incidents,
+                    ROUND(AVG(rainfall_mm), 2) as avg_rainfall,
+                    ROUND(MAX(rainfall_mm), 2) as max_rainfall,
+                    SUM(casualties) as total_casualties
+                FROM cloudburst_history
+                WHERE state = ?
+            """, (state,))
+            
+            recent = execute_query("""
+                SELECT COUNT(*) as recent_incidents
+                FROM cloudburst_history
+                WHERE state = ? AND date >= '2024-01-01'
+            """, (state,))
+            
+            if not stats.empty and stats['total_incidents'].iloc[0] > 0:
+                response = f"**📊 Cloudburst Information for {state}:**\n\n"
+                response += f"Total incidents: **{int(stats['total_incidents'].iloc[0])}**\n"
+                response += f"Recent incidents (2024): **{int(recent['recent_incidents'].iloc[0])}**\n"
+                response += f"Average rainfall: **{stats['avg_rainfall'].iloc[0]} mm**\n"
+                response += f"Maximum rainfall: **{stats['max_rainfall'].iloc[0]} mm**\n"
+                response += f"Total casualties: **{int(stats['total_casualties'].iloc[0])}**"
+                return response, stats
+            else:
+                return f"No historical cloudburst data found for **{state}**.", None
+        
+        # Query: Recent cloudbursts or 2024 data
+        elif '2024' in query_lower or 'recent' in query_lower or 'latest' in query_lower:
+            result = execute_query("""
+                SELECT state, district, date, rainfall_mm, casualties, severity
+                FROM cloudburst_history
+                WHERE date >= '2024-01-01'
+                ORDER BY date DESC
+                LIMIT 10
+            """)
+            
+            if not result.empty:
+                response = "**📅 Recent Cloudbursts (2024):**\n\n"
+                response += f"Total incidents in 2024: **{len(result)}**\n\n"
+                return response, result
+        
+        # Query: Severity levels
+        elif 'severity' in query_lower or 'high severity' in query_lower:
+            result = execute_query("""
+                SELECT severity, COUNT(*) as count
+                FROM cloudburst_history
+                GROUP BY severity
+                ORDER BY count DESC
+            """)
+            
+            if not result.empty:
+                response = "**⚠️ Cloudbursts by Severity:**\n\n"
+                for idx, row in result.iterrows():
+                    response += f"**{row['severity']}**: {row['count']} incidents\n"
+                return response, result
+        
+        # Query: Compare states
+        elif 'compare' in query_lower and len(mentioned_states) >= 2:
+            state1, state2 = mentioned_states[0], mentioned_states[1]
+            result = execute_query("""
+                SELECT 
+                    state,
+                    COUNT(*) as incidents,
+                    ROUND(AVG(rainfall_mm), 2) as avg_rainfall,
+                    SUM(casualties) as casualties
+                FROM cloudburst_history
+                WHERE state IN (?, ?)
+                GROUP BY state
+            """, (state1, state2))
+            
+            if not result.empty:
+                response = f"**⚖️ Comparison: {state1} vs {state2}**\n\n"
+                return response, result
+        
+        # Query: Average rainfall
+        elif 'average rainfall' in query_lower or 'avg rainfall' in query_lower:
+            if mentioned_states:
+                state = mentioned_states[0]
+                result = execute_query("""
+                    SELECT ROUND(AVG(rainfall_mm), 2) as avg_rainfall
+                    FROM cloudburst_history
+                    WHERE state = ?
+                """, (state,))
+                
+                if not result.empty:
+                    response = f"**🌧️ Average Rainfall in {state}:**\n\n"
+                    response += f"**{result['avg_rainfall'].iloc[0]} mm**"
+                    return response, result
+            else:
+                result = execute_query("""
+                    SELECT state, ROUND(AVG(rainfall_mm), 2) as avg_rainfall
+                    FROM cloudburst_history
+                    GROUP BY state
+                    ORDER BY avg_rainfall DESC
+                    LIMIT 5
+                """)
+                
+                response = "**🌧️ Top States by Average Rainfall:**\n\n"
+                for idx, row in result.iterrows():
+                    response += f"{idx+1}. **{row['state']}**: {row['avg_rainfall']} mm\n"
+                return response, result
+        
+        # Default: List all states with data
+        else:
+            result = execute_query("""
+                SELECT DISTINCT state
+                FROM cloudburst_history
+                ORDER BY state
+            """)
+            
+            response = "**💬 I can help you with cloudburst information!**\n\n"
+            response += "Try asking me:\n"
+            response += "- Which state has the most cloudbursts?\n"
+            response += "- What are the total casualties?\n"
+            response += "- Tell me about cloudbursts in [state name]\n"
+            response += "- What was the highest rainfall recorded?\n"
+            response += "- Show me recent cloudbursts\n"
+            response += "- Compare [state1] and [state2]\n\n"
+            response += f"I have data for {len(result)} states."
+            return response, result
+            
+    except Exception as e:
+        return f"❌ Sorry, I encountered an error: {str(e)}", None
+
 # Main UI
 st.title("🌧️ Cloudburst Prediction System - India")
 st.markdown("### Real-time Weather Analysis & Historical Data (2023-2024)")
+
 # Sidebar
 st.sidebar.header("Navigation")
 page = st.sidebar.radio(
     "Select Page",
-    ["🏠 Home & Prediction", "📊 Database Explorer", "🔍 Query Information"]
+    ["🏠 Home & Prediction", "💬 Chatbot Assistant", "📊 Database Explorer", "🔍 Query Information"]
 )
+
 if page == "🏠 Home & Prediction":
     st.header("Cloudburst Risk Assessment")
    
@@ -438,6 +884,131 @@ if page == "🏠 Home & Prediction":
    
     elif predict_btn:
         st.warning("⚠️ Please select a state first!")
+
+elif page == "💬 Chatbot Assistant":
+    st.header("🤖 Cloudburst Information Chatbot")
+    st.markdown("Ask me anything about cloudbursts in India! I can answer questions about rainfall, casualties, state comparisons, and more.")
+    
+    # Display chat history
+    chat_container = st.container()
+    with chat_container:
+        for chat in st.session_state.chat_history:
+            with st.chat_message("user"):
+                st.write(chat['user'])
+            with st.chat_message("assistant"):
+                st.markdown(chat['bot'])
+                if chat.get('data') is not None and not chat['data'].empty:
+                    st.dataframe(chat['data'], use_container_width=True, hide_index=True)
+    
+    # Chat input
+    user_input = st.chat_input("Ask me about cloudbursts... (e.g., 'Which state has the most cloudbursts?')")
+    
+    if user_input:
+        # Process the query
+        response, data = process_chatbot_query(user_input)
+        
+        # Add to chat history
+        st.session_state.chat_history.append({
+            'user': user_input,
+            'bot': response,
+            'data': data
+        })
+        
+        # Rerun to display new message
+        st.rerun()
+    
+    # Quick query buttons
+    st.markdown("---")
+    st.markdown("**💡 Quick Queries:**")
+    qcol1, qcol2, qcol3, qcol4 = st.columns(4)
+    
+    with qcol1:
+        if st.button("🏆 Most Cloudbursts", use_container_width=True):
+            response, data = process_chatbot_query("Which state has the most cloudbursts?")
+            st.session_state.chat_history.append({
+                'user': "Which state has the most cloudbursts?",
+                'bot': response,
+                'data': data
+            })
+            st.rerun()
+    
+    with qcol2:
+        if st.button("✅ Safest States", use_container_width=True):
+            response, data = process_chatbot_query("Which are the safest states?")
+            st.session_state.chat_history.append({
+                'user': "Which are the safest states?",
+                'bot': response,
+                'data': data
+            })
+            st.rerun()
+    
+    with qcol3:
+        if st.button("💔 Most Dangerous", use_container_width=True):
+            response, data = process_chatbot_query("Which is the most dangerous state?")
+            st.session_state.chat_history.append({
+                'user': "Which is the most dangerous state?",
+                'bot': response,
+                'data': data
+            })
+            st.rerun()
+    
+    with qcol4:
+        if st.button("📅 Monthly Trends", use_container_width=True):
+            response, data = process_chatbot_query("When do cloudbursts occur most?")
+            st.session_state.chat_history.append({
+                'user': "When do cloudbursts occur most?",
+                'bot': response,
+                'data': data
+            })
+            st.rerun()
+    
+    qcol5, qcol6, qcol7, qcol8 = st.columns(4)
+    
+    with qcol5:
+        if st.button("🛡️ No Cloudbursts", use_container_width=True):
+            response, data = process_chatbot_query("Which states have no cloudbursts?")
+            st.session_state.chat_history.append({
+                'user': "Which states have no cloudbursts?",
+                'bot': response,
+                'data': data
+            })
+            st.rerun()
+    
+    with qcol6:
+        if st.button("🏘️ Top Districts", use_container_width=True):
+            response, data = process_chatbot_query("Which districts have the most cloudbursts?")
+            st.session_state.chat_history.append({
+                'user': "Which districts have the most cloudbursts?",
+                'bot': response,
+                'data': data
+            })
+            st.rerun()
+    
+    with qcol7:
+        if st.button("📊 Year Comparison", use_container_width=True):
+            response, data = process_chatbot_query("Compare 2023 and 2024")
+            st.session_state.chat_history.append({
+                'user': "Compare 2023 and 2024",
+                'bot': response,
+                'data': data
+            })
+            st.rerun()
+    
+    with qcol8:
+        if st.button("📈 Trends", use_container_width=True):
+            response, data = process_chatbot_query("Show me cloudburst trends")
+            st.session_state.chat_history.append({
+                'user': "Show me cloudburst trends",
+                'bot': response,
+                'data': data
+            })
+            st.rerun()
+    
+    # Clear chat button
+    if st.button("🗑️ Clear Chat History"):
+        st.session_state.chat_history = []
+        st.rerun()
+
 elif page == "📊 Database Explorer":
     st.header("Complete Cloudburst Database (2023-2024)")
    
@@ -544,6 +1115,7 @@ elif page == "📊 Database Explorer":
             color_discrete_map={'High': '#ff4444', 'Medium': '#ffaa00'}
         )
         st.plotly_chart(fig, use_container_width=True)
+
 elif page == "🔍 Query Information":
     st.header("Query Weather & Rainfall Information")
     st.markdown("Get specific information about rainfall, humidity, precipitation for any state")
@@ -639,6 +1211,7 @@ elif page == "🔍 Query Information":
                 st.plotly_chart(fig, use_container_width=True)
         else:
             st.warning("No data found for the selected query.")
+
 # Footer
 st.divider()
 st.markdown("""
